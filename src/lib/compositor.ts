@@ -37,7 +37,11 @@ export class Compositor {
     if (!ctx) throw new Error('Canvas 2D not supported');
     this.ctx = ctx;
     this.container = document.createElement('div');
-    this.container.style.cssText = 'position:fixed;width:0;height:0;overflow:hidden;pointer-events:none;';
+    // Positioned off-screen but at real size (not width:0/height:0): mobile
+    // browsers throttle decode rate for video elements they consider
+    // "not visible", and a zero-size clipped box qualifies — that was
+    // starving the canvas draw of fresh frames and showing up as stutter.
+    this.container.style.cssText = 'position:fixed;left:-9999px;top:0;overflow:visible;pointer-events:none;';
     document.body.appendChild(this.container);
   }
 
@@ -57,6 +61,8 @@ export class Compositor {
       el.muted = true;
       el.playsInline = true;
       el.preload = 'auto';
+      el.width = clip.width;
+      el.height = clip.height;
       const redrawWhenReady = () => {
         if (!this.playing) this.drawFrame();
       };
