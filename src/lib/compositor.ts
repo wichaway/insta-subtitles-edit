@@ -27,6 +27,8 @@ export class Compositor {
   private playing = false;
   private audioCtx: AudioContext | null = null;
   private audioNodes = new Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>();
+  private tickCount = 0;
+  private lastError: string | null = null;
 
   constructor(opts: CompositorOptions) {
     this.opts = opts;
@@ -133,8 +135,17 @@ export class Compositor {
       }
       this.setVolume(clip.id, frame.alpha);
 
-      ctx.globalAlpha = frame.alpha;
-      drawContain(ctx, el, clip.width, clip.height, canvas.width, canvas.height);
+      // ctx.drawImage() throws if a <video>'s readyState is below
+      // HAVE_CURRENT_DATA (2) — happens routinely right after a video
+      // element is created or right at a clip transition. Left unguarded,
+      // that throw aborts drawFrame() before it returns, which (when called
+      // from the rAF loop in tick()) skips the requestAnimationFrame call
+      // that reschedules the next frame — permanently freezing playback
+      // from one transient hiccup.
+      if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        ctx.globalAlpha = frame.alpha;
+        drawContain(ctx, el, clip.width, clip.height, canvas.width, canvas.height);
+      }
     }
     ctx.globalAlpha = 1;
 
@@ -149,19 +160,30 @@ export class Compositor {
 
   private tick = (ts: number) => {
     if (!this.playing) return;
+    this.tickCount++;
     const dt = this.lastTs ? (ts - this.lastTs) / 1000 : 0;
     this.lastTs = ts;
     this.t += dt;
     const dur = this.duration;
-    if (this.t >= dur) {
-      this.t = dur;
+    const ended = this.t >= dur;
+    if (ended) this.t = dur;
+
+    // Belt-and-suspenders: whatever happens inside drawFrame(), never let it
+    // stop the rAF loop from rescheduling below — a single bad frame should
+    // never permanently freeze playback.
+    try {
       this.drawFrame();
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+      console.error('Compositor: skipping a frame after draw error', err);
+    }
+
+    if (ended) {
       this.pause();
       this.opts.onEnded?.();
       this.opts.onTime?.(this.t, dur);
       return;
     }
-    this.drawFrame();
     this.opts.onTime?.(this.t, dur);
     this.rafId = requestAnimationFrame(this.tick);
   };
@@ -186,12 +208,34 @@ export class Compositor {
 
   seek(t: number) {
     this.t = Math.min(Math.max(0, t), this.duration);
-    this.drawFrame();
+    try {
+      this.drawFrame();
+    } catch (err) {
+      console.error('Compositor: draw error during seek', err);
+    }
     this.opts.onTime?.(this.t, this.duration);
   }
 
   isPlaying() {
     return this.playing;
+  }
+
+  /** Snapshot of internal state for the on-screen debug readout. */
+  getDebugInfo() {
+    return {
+      playing: this.playing,
+      t: this.t,
+      tickCount: this.tickCount,
+      lastError: this.lastError,
+      videos: Array.from(this.videoEls.entries()).map(([id, el]) => ({
+        id: id.slice(0, 6),
+        readyState: el.readyState,
+        paused: el.paused,
+        currentTime: Number(el.currentTime.toFixed(2)),
+        networkState: el.networkState,
+        error: el.error?.message ?? null,
+      })),
+    };
   }
 
   /** Renders exactly one frame at the given time without touching playback state — used by the exporter. */

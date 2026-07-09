@@ -43,6 +43,7 @@ export function PreviewPlayer() {
   const [playing, setPlaying] = useState(false);
   const [t, setT] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [debugInfo, setDebugInfo] = useState('');
   const dims = FORMAT_DIMENSIONS[format];
 
   const preview = previewDims(dims.w, dims.h);
@@ -83,6 +84,25 @@ export function PreviewPlayer() {
     setT(seekRequest);
     consumeSeekRequest();
   }, [seekRequest, consumeSeekRequest]);
+
+  // Temporary on-screen diagnostic readout for tracking down mobile playback
+  // issues — polls independently of the compositor's own rAF loop (via
+  // setInterval, not requestAnimationFrame) specifically so it keeps
+  // reporting state even if the animation loop itself is the thing that's
+  // stuck.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const info = compositorRef.current?.getDebugInfo();
+      if (!info) return;
+      setDebugInfo(
+        `playing=${info.playing} t=${info.t.toFixed(2)} ticks=${info.tickCount} err=${info.lastError ?? '-'}\n` +
+          info.videos
+            .map((v) => `#${v.id} ready=${v.readyState} net=${v.networkState} paused=${v.paused} ct=${v.currentTime} err=${v.error ?? '-'}`)
+            .join('\n')
+      );
+    }, 300);
+    return () => clearInterval(id);
+  }, []);
 
   function togglePlay() {
     const c = compositorRef.current;
@@ -146,6 +166,12 @@ export function PreviewPlayer() {
             {fmt(t)} / {fmt(duration)}
           </span>
         </div>
+      )}
+
+      {clips.length > 0 && debugInfo && (
+        <pre dir="ltr" className="whitespace-pre-wrap rounded-lg border border-border bg-surface-2 p-2 text-[10px] text-muted">
+          {debugInfo}
+        </pre>
       )}
     </div>
   );
