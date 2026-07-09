@@ -3,6 +3,18 @@ import { useEditorStore, FORMAT_DIMENSIONS } from '../state/store';
 import { buildTimeline } from '../lib/timeline';
 import { Compositor } from '../lib/compositor';
 
+// The live preview is only ever shown shrunk on screen (max 60vh), so
+// compositing it at full export resolution every animation frame wastes
+// GPU/CPU and causes stutter on phones. Cap the canvas backing store while
+// keeping the exact aspect ratio; subtitleRender.ts already sizes text
+// relative to canvas dimensions, so nothing looks different, just lighter.
+const PREVIEW_MAX_DIM = 480;
+
+function previewDims(w: number, h: number) {
+  const scale = Math.min(1, PREVIEW_MAX_DIM / Math.max(w, h));
+  return { w: Math.round(w * scale), h: Math.round(h * scale) };
+}
+
 function fmt(sec: number) {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60)
@@ -33,12 +45,14 @@ export function PreviewPlayer() {
   const [duration, setDuration] = useState(0);
   const dims = FORMAT_DIMENSIONS[format];
 
+  const preview = previewDims(dims.w, dims.h);
+
   useEffect(() => {
     if (!canvasRef.current) return;
     const compositor = new Compositor({
       canvas: canvasRef.current,
-      width: dims.w,
-      height: dims.h,
+      width: preview.w,
+      height: preview.h,
       getSegments: () => buildTimeline(stateRef.current.clips, stateRef.current.crossfade),
       getCues: () => stateRef.current.subtitles,
       getStyle: () => stateRef.current.subtitleStyle,
@@ -57,7 +71,7 @@ export function PreviewPlayer() {
     compositor.seek(0);
     return () => compositor.destroy();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dims.w, dims.h]);
+  }, [preview.w, preview.h]);
 
   useEffect(() => {
     compositorRef.current?.seek(compositorRef.current.currentTime);
