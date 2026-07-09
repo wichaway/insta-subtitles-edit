@@ -29,11 +29,13 @@ export class Compositor {
   private audioNodes = new Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>();
   private tickCount = 0;
   private lastError: string | null = null;
-  // Tracks how many consecutive ticks a clip's video currentTime hasn't
-  // moved while playing — a high count means the canvas is redrawing a
-  // stale decoded frame because the video's own decode is lagging behind
-  // the draw loop, not that the loop itself is stuck.
-  private staleInfo = new Map<string, { lastCt: number; staleTicks: number }>();
+  // Counts genuinely new decoded frames per clip via requestVideoFrameCallback
+  // (NOT currentTime — that's a continuously-advancing presentation clock and
+  // keeps moving even when the decoder hasn't produced a new frame yet, so
+  // comparing currentTime between ticks can't actually detect stale-frame
+  // redraws). Comparing this counter's growth rate to tickCount's tells us
+  // whether the video's own decode is keeping up with the draw loop.
+  private presentedFrames = new Map<string, number>();
 
   constructor(opts: CompositorOptions) {
     this.opts = opts;
@@ -83,6 +85,18 @@ export class Compositor {
       el.addEventListener('seeked', redrawWhenReady);
       this.container.appendChild(el);
       this.videoEls.set(clip.id, el);
+
+      const videoEl = el;
+      if ('requestVideoFrameCallback' in videoEl) {
+        this.presentedFrames.set(clip.id, 0);
+        const trackFrame = (_now: number, metadata: { presentedFrames: number }) => {
+          this.presentedFrames.set(clip.id, metadata.presentedFrames);
+          if (this.videoEls.get(clip.id) === videoEl) {
+            videoEl.requestVideoFrameCallback(trackFrame);
+          }
+        };
+        videoEl.requestVideoFrameCallback(trackFrame);
+      }
     }
     return el;
   }
@@ -150,15 +164,6 @@ export class Compositor {
       // from the rAF loop in tick()) skips the requestAnimationFrame call
       // that reschedules the next frame — permanently freezing playback
       // from one transient hiccup.
-      if (this.playing) {
-        const prev = this.staleInfo.get(clip.id);
-        if (prev && prev.lastCt === el.currentTime) {
-          prev.staleTicks++;
-        } else {
-          this.staleInfo.set(clip.id, { lastCt: el.currentTime, staleTicks: 0 });
-        }
-      }
-
       if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         ctx.globalAlpha = frame.alpha;
         drawContain(ctx, el, clip.width, clip.height, canvas.width, canvas.height);
@@ -251,7 +256,7 @@ export class Compositor {
         currentTime: Number(el.currentTime.toFixed(2)),
         networkState: el.networkState,
         error: el.error?.message ?? null,
-        staleTicks: this.staleInfo.get(id)?.staleTicks ?? 0,
+        presentedFrames: this.presentedFrames.get(id) ?? -1,
       })),
     };
   }
@@ -267,6 +272,7 @@ export class Compositor {
     this.videoEls.forEach((el) => el.remove());
     this.videoEls.clear();
     this.audioNodes.clear();
+    this.presentedFrames.clear();
     this.container.remove();
   }
 }

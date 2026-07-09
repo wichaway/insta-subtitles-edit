@@ -97,7 +97,7 @@ export function PreviewPlayer() {
       setDebugInfo(
         `playing=${info.playing} t=${info.t.toFixed(2)} ticks=${info.tickCount} err=${info.lastError ?? '-'}\n` +
           info.videos
-            .map((v) => `#${v.id} ready=${v.readyState} net=${v.networkState} paused=${v.paused} ct=${v.currentTime} stale=${v.staleTicks} err=${v.error ?? '-'}`)
+            .map((v) => `#${v.id} ready=${v.readyState} net=${v.networkState} paused=${v.paused} ct=${v.currentTime} frames=${v.presentedFrames} err=${v.error ?? '-'}`)
             .join('\n')
       );
     }, 300);
