@@ -37,11 +37,14 @@ export class Compositor {
     if (!ctx) throw new Error('Canvas 2D not supported');
     this.ctx = ctx;
     this.container = document.createElement('div');
-    // Positioned off-screen but at real size (not width:0/height:0): mobile
-    // browsers throttle decode rate for video elements they consider
-    // "not visible", and a zero-size clipped box qualifies — that was
-    // starving the canvas draw of fresh frames and showing up as stutter.
-    this.container.style.cssText = 'position:fixed;left:-9999px;top:0;overflow:visible;pointer-events:none;';
+    // Kept within viewport bounds (top:0/left:0) and hidden via opacity, NOT
+    // pushed far off-screen: mobile Chrome defers loading video data for
+    // elements it judges "too far off-screen to ever be seen" to save
+    // battery/data, which starves the canvas draw of frames entirely.
+    // opacity:0 still intersects the viewport so that heuristic doesn't
+    // kick in, while width:0/height:0 elements separately get decode-rate
+    // throttled for being zero-size — real size + opacity:0 avoids both.
+    this.container.style.cssText = 'position:fixed;top:0;left:0;opacity:0;overflow:visible;pointer-events:none;';
     document.body.appendChild(this.container);
   }
 
