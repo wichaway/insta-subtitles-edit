@@ -5,7 +5,7 @@ const CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 
-async function getFFmpeg(onLog?: (msg: string) => void): Promise<FFmpeg> {
+export async function getFFmpeg(onLog?: (msg: string) => void): Promise<FFmpeg> {
   if (!ffmpegPromise) {
     ffmpegPromise = (async () => {
       const ffmpeg = new FFmpeg();

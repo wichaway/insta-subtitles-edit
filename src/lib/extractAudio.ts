@@ -1,36 +1,48 @@
+import { fetchFile } from '@ffmpeg/util';
 import type { Clip } from './types';
+import { getFFmpeg } from './transcodeMp4';
 
 const TARGET_SAMPLE_RATE = 16000;
 
-async function decodeClipMono(clip: Clip, ctx: AudioContext): Promise<Float32Array> {
-  const buf = await clip.file.arrayBuffer();
-  const decoded = await ctx.decodeAudioData(buf.slice(0));
-  const startSample = Math.floor(clip.trimStart * decoded.sampleRate);
-  const endSample = Math.min(decoded.length, Math.ceil(clip.trimEnd * decoded.sampleRate));
-  const length = Math.max(0, endSample - startSample);
-  const mono = new Float32Array(length);
-  for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
-    const data = decoded.getChannelData(ch);
-    for (let i = 0; i < length; i++) {
-      mono[i] += data[startSample + i] / decoded.numberOfChannels;
-    }
-  }
-  return resample(mono, decoded.sampleRate, TARGET_SAMPLE_RATE);
+function extOf(file: File): string {
+  const dot = file.name.lastIndexOf('.');
+  return dot >= 0 ? file.name.slice(dot + 1) : 'mp4';
 }
 
-function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
-  if (fromRate === toRate) return input;
-  const ratio = fromRate / toRate;
-  const outLength = Math.floor(input.length / ratio);
-  const output = new Float32Array(outLength);
-  for (let i = 0; i < outLength; i++) {
-    const srcPos = i * ratio;
-    const i0 = Math.floor(srcPos);
-    const i1 = Math.min(i0 + 1, input.length - 1);
-    const frac = srcPos - i0;
-    output[i] = input[i0] * (1 - frac) + input[i1] * frac;
+/**
+ * Extracts a clip's trimmed audio as mono 16kHz PCM via FFmpeg rather than
+ * AudioContext.decodeAudioData: decodeAudioData's support for demuxing audio
+ * out of arbitrary video containers is inconsistent on mobile browsers (it's
+ * primarily meant for audio files) and was failing outright on Android
+ * Chrome. FFmpeg has proper codec/container support and also handles the
+ * trim + resample in one pass.
+ */
+async function decodeClipMono(clip: Clip): Promise<Float32Array> {
+  const ffmpeg = await getFFmpeg();
+  const inputName = `extract-in.${extOf(clip.file)}`;
+  const outputName = 'extract-out.pcm';
+  await ffmpeg.writeFile(inputName, await fetchFile(clip.file));
+  try {
+    await ffmpeg.exec([
+      '-i', inputName,
+      '-ss', clip.trimStart.toString(),
+      '-to', clip.trimEnd.toString(),
+      '-ar', String(TARGET_SAMPLE_RATE),
+      '-ac', '1',
+      '-f', 'f32le',
+      outputName,
+    ]);
+    const data = (await ffmpeg.readFile(outputName)) as Uint8Array;
+    // Copy into a fresh buffer: the FS buffer's byteOffset may not be 4-byte
+    // aligned, which Float32Array requires.
+    const floatCount = Math.floor(data.length / 4);
+    const aligned = new Uint8Array(floatCount * 4);
+    aligned.set(data.subarray(0, floatCount * 4));
+    return new Float32Array(aligned.buffer);
+  } finally {
+    await ffmpeg.deleteFile(inputName).catch(() => {});
+    await ffmpeg.deleteFile(outputName).catch(() => {});
   }
-  return output;
 }
 
 /**
@@ -39,26 +51,18 @@ function resample(input: Float32Array, fromRate: number, toRate: number): Float3
  * manually afterwards in the subtitle list).
  */
 export async function extractMergedAudio(clips: Clip[]): Promise<Float32Array> {
-  const ctx = new AudioContext();
-  try {
-    // Decoded sequentially, not with Promise.all: decoding every clip's full
-    // audio track in parallel spikes memory (raw file + decoded PCM per
-    // clip, all at once) enough to crash mobile browser tabs.
-    const parts: Float32Array[] = [];
-    for (const c of clips) {
-      parts.push(await decodeClipMono(c, ctx));
-    }
-    const total = parts.reduce((sum, p) => sum + p.length, 0);
-    const out = new Float32Array(total);
-    let offset = 0;
-    for (const p of parts) {
-      out.set(p, offset);
-      offset += p.length;
-    }
-    return out;
-  } finally {
-    ctx.close();
+  const parts: Float32Array[] = [];
+  for (const c of clips) {
+    parts.push(await decodeClipMono(c));
   }
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
 }
 
 export const WHISPER_SAMPLE_RATE = TARGET_SAMPLE_RATE;
