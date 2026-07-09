@@ -19,7 +19,32 @@ function pickMimeType(): string {
   return candidates.find((c) => MediaRecorder.isTypeSupported(c)) ?? 'video/webm';
 }
 
+/**
+ * Rendering runs in real time via canvas.captureStream + MediaRecorder, so
+ * the tab must stay foregrounded for the full clip duration. Mobile browsers
+ * suspend background-tab timers on screen lock, which hangs the export
+ * indefinitely — holding a wake lock keeps the screen (and the tab) alive.
+ * Requires a secure context (HTTPS or localhost); silently no-ops otherwise.
+ */
+async function acquireWakeLock(): Promise<WakeLockSentinel | null> {
+  if (!('wakeLock' in navigator)) return null;
+  try {
+    return await navigator.wakeLock.request('screen');
+  } catch {
+    return null;
+  }
+}
+
 export async function renderToWebm(opts: RenderOptions): Promise<Blob> {
+  const wakeLock = await acquireWakeLock();
+  try {
+    return await recordWebm(opts);
+  } finally {
+    await wakeLock?.release().catch(() => {});
+  }
+}
+
+async function recordWebm(opts: RenderOptions): Promise<Blob> {
   const canvas = document.createElement('canvas');
   const audioCtx = new AudioContext();
   const destination = audioCtx.createMediaStreamDestination();
