@@ -90,12 +90,23 @@ export function PreviewPlayer() {
   // setInterval, not requestAnimationFrame) specifically so it keeps
   // reporting state even if the animation loop itself is the thing that's
   // stuck.
+  const ratePoll = useRef<{ wall: number; t: number } | null>(null);
   useEffect(() => {
     const id = setInterval(() => {
       const info = compositorRef.current?.getDebugInfo();
       if (!info) return;
+      // Media-clock seconds per wall-clock second between polls. 1.00 means
+      // realtime playback; well below 1.00 means the video's own decode
+      // can't keep up and the (video-slaved) timeline runs slow with it.
+      const now = performance.now();
+      let rate = '-';
+      if (info.playing && ratePoll.current) {
+        const dWall = (now - ratePoll.current.wall) / 1000;
+        if (dWall > 0.05) rate = ((info.t - ratePoll.current.t) / dWall).toFixed(2);
+      }
+      ratePoll.current = info.playing ? { wall: now, t: info.t } : null;
       setDebugInfo(
-        `playing=${info.playing} t=${info.t.toFixed(2)} ticks=${info.tickCount} err=${info.lastError ?? '-'}\n` +
+        `playing=${info.playing} t=${info.t.toFixed(2)} ticks=${info.tickCount} rate=${rate} err=${info.lastError ?? '-'}\n` +
           info.videos
             .map((v) => `#${v.id} ready=${v.readyState} net=${v.networkState} paused=${v.paused} ct=${v.currentTime} frames=${v.presentedFrames} err=${v.error ?? '-'}`)
             .join('\n')

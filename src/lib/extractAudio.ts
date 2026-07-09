@@ -1,8 +1,10 @@
-import { fetchFile } from '@ffmpeg/util';
+import { FFFSType } from '@ffmpeg/ffmpeg';
 import type { Clip } from './types';
 import { getFFmpeg } from './transcodeMp4';
 
 const TARGET_SAMPLE_RATE = 16000;
+
+let mountSeq = 0;
 
 function extOf(file: File): string {
   const dot = file.name.lastIndexOf('.');
@@ -11,22 +13,33 @@ function extOf(file: File): string {
 
 /**
  * Extracts a clip's trimmed audio as mono 16kHz PCM via FFmpeg rather than
- * AudioContext.decodeAudioData: decodeAudioData's support for demuxing audio
- * out of arbitrary video containers is inconsistent on mobile browsers (it's
- * primarily meant for audio files) and was failing outright on Android
- * Chrome. FFmpeg has proper codec/container support and also handles the
- * trim + resample in one pass.
+ * AudioContext.decodeAudioData (whose video-container demuxing support is
+ * unreliable on mobile browsers and failed outright on-device).
+ *
+ * The source file is mounted via WORKERFS instead of being copied into the
+ * WASM filesystem: phone-recorded clips run hundreds of MB, and the copy
+ * (whole-file ArrayBuffer + a second copy in the FS) blew Safari's per-tab
+ * memory limit, crashing and reloading the page mid-transcription. WORKERFS
+ * lets FFmpeg read the File directly with no up-front copy. -vn skips the
+ * video stream entirely, so only audio packets are ever decoded.
  */
 async function decodeClipMono(clip: Clip): Promise<Float32Array> {
   const ffmpeg = await getFFmpeg();
-  const inputName = `extract-in.${extOf(clip.file)}`;
-  const outputName = 'extract-out.pcm';
-  await ffmpeg.writeFile(inputName, await fetchFile(clip.file));
+  const seq = mountSeq++;
+  const mountDir = `/mnt-audio-${seq}`;
+  const outputName = `extract-out-${seq}.pcm`;
+  // Cheap blob wrapper (no data copy) with a predictable ASCII name, so the
+  // FS path is safe regardless of the original filename.
+  const input = new File([clip.file], `input-${seq}.${extOf(clip.file)}`, { type: clip.file.type });
+
+  await ffmpeg.createDir(mountDir);
+  await ffmpeg.mount(FFFSType.WORKERFS, { files: [input] }, mountDir);
   try {
     await ffmpeg.exec([
-      '-i', inputName,
+      '-i', `${mountDir}/${input.name}`,
       '-ss', clip.trimStart.toString(),
       '-to', clip.trimEnd.toString(),
+      '-vn',
       '-ar', String(TARGET_SAMPLE_RATE),
       '-ac', '1',
       '-f', 'f32le',
@@ -40,8 +53,9 @@ async function decodeClipMono(clip: Clip): Promise<Float32Array> {
     aligned.set(data.subarray(0, floatCount * 4));
     return new Float32Array(aligned.buffer);
   } finally {
-    await ffmpeg.deleteFile(inputName).catch(() => {});
     await ffmpeg.deleteFile(outputName).catch(() => {});
+    await ffmpeg.unmount(mountDir).catch(() => {});
+    await ffmpeg.deleteDir(mountDir).catch(() => {});
   }
 }
 

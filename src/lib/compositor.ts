@@ -99,10 +99,32 @@ export class Compositor {
       };
       el.addEventListener('loadeddata', redrawWhenReady);
       el.addEventListener('seeked', redrawWhenReady);
+
+      // iOS Safari ignores preload="auto" and won't decode any frame data
+      // until playback actually starts (readyState stays at HAVE_METADATA),
+      // which left the preview canvas black until the user pressed play.
+      // A muted play→pause (allowed without a user gesture for muted
+      // playsinline video) forces the first frame to decode; the
+      // 'loadeddata' listener above then paints it.
+      const videoEl = el;
+      const primeFirstFrame = () => {
+        if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        videoEl
+          .play()
+          .then(() => {
+            if (!this.playing) videoEl.pause();
+          })
+          .catch(() => {});
+      };
+      if (el.readyState >= HTMLMediaElement.HAVE_METADATA) {
+        primeFirstFrame();
+      } else {
+        el.addEventListener('loadedmetadata', primeFirstFrame, { once: true });
+      }
+
       this.container.appendChild(el);
       this.videoEls.set(clip.id, el);
 
-      const videoEl = el;
       if ('requestVideoFrameCallback' in videoEl) {
         this.presentedFrames.set(clip.id, 0);
         const trackFrame = (_now: number, metadata: { presentedFrames: number }) => {
