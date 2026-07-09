@@ -29,6 +29,11 @@ export class Compositor {
   private audioNodes = new Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>();
   private tickCount = 0;
   private lastError: string | null = null;
+  // Tracks how many consecutive ticks a clip's video currentTime hasn't
+  // moved while playing — a high count means the canvas is redrawing a
+  // stale decoded frame because the video's own decode is lagging behind
+  // the draw loop, not that the loop itself is stuck.
+  private staleInfo = new Map<string, { lastCt: number; staleTicks: number }>();
 
   constructor(opts: CompositorOptions) {
     this.opts = opts;
@@ -39,14 +44,17 @@ export class Compositor {
     if (!ctx) throw new Error('Canvas 2D not supported');
     this.ctx = ctx;
     this.container = document.createElement('div');
-    // Kept within viewport bounds (top:0/left:0) and hidden via opacity, NOT
-    // pushed far off-screen: mobile Chrome defers loading video data for
-    // elements it judges "too far off-screen to ever be seen" to save
-    // battery/data, which starves the canvas draw of frames entirely.
-    // opacity:0 still intersects the viewport so that heuristic doesn't
-    // kick in, while width:0/height:0 elements separately get decode-rate
-    // throttled for being zero-size — real size + opacity:0 avoids both.
-    this.container.style.cssText = 'position:fixed;top:0;left:0;opacity:0;overflow:visible;pointer-events:none;';
+    // Genuinely on-screen (real opacity, real position), just clipped to a
+    // 1x1px corner via overflow:hidden — NOT hidden via opacity:0/off-screen
+    // positioning. iOS Safari's compositor deprioritizes actual frame
+    // *decoding* (not just data loading) for video it judges isn't really
+    // being painted, and opacity:0 still counts as "not really visible" to
+    // it — confirmed on-device: video reached readyState 4 and the rAF loop
+    // ran at a healthy rate, but playback still looked stepped/juddery,
+    // matching "canvas redrawing a stale decoded frame repeatedly" rather
+    // than a stalled loop. A real 1x1 opaque pixel is enough to get full
+    // decode priority while being visually imperceptible.
+    this.container.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;overflow:hidden;opacity:1;pointer-events:none;';
     document.body.appendChild(this.container);
   }
 
@@ -142,6 +150,15 @@ export class Compositor {
       // from the rAF loop in tick()) skips the requestAnimationFrame call
       // that reschedules the next frame — permanently freezing playback
       // from one transient hiccup.
+      if (this.playing) {
+        const prev = this.staleInfo.get(clip.id);
+        if (prev && prev.lastCt === el.currentTime) {
+          prev.staleTicks++;
+        } else {
+          this.staleInfo.set(clip.id, { lastCt: el.currentTime, staleTicks: 0 });
+        }
+      }
+
       if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         ctx.globalAlpha = frame.alpha;
         drawContain(ctx, el, clip.width, clip.height, canvas.width, canvas.height);
@@ -234,6 +251,7 @@ export class Compositor {
         currentTime: Number(el.currentTime.toFixed(2)),
         networkState: el.networkState,
         error: el.error?.message ?? null,
+        staleTicks: this.staleInfo.get(id)?.staleTicks ?? 0,
       })),
     };
   }
