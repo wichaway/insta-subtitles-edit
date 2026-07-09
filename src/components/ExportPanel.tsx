@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useEditorStore, FORMAT_DIMENSIONS } from '../state/store';
 import { buildTimeline, totalDuration } from '../lib/timeline';
-import { renderToWebm } from '../lib/export';
+import { renderVideo } from '../lib/export';
 import { webmToMp4 } from '../lib/transcodeMp4';
 
 type Stage = 'idle' | 'rendering' | 'converting' | 'done' | 'error';
@@ -17,6 +17,7 @@ export function ExportPanel() {
   const [progress, setProgress] = useState(0);
   const [mp4, setMp4] = useState(true);
   const [url, setUrl] = useState<string | null>(null);
+  const [outputExt, setOutputExt] = useState<'mp4' | 'webm'>('mp4');
   const [error, setError] = useState<string | null>(null);
 
   const segments = buildTimeline(clips, crossfade);
@@ -29,21 +30,27 @@ export function ExportPanel() {
     try {
       setStage('rendering');
       setProgress(0);
-      const webm = await renderToWebm({
+      const recorded = await renderVideo({
         width: dims.w,
         height: dims.h,
         segments,
         cues: subtitles,
         style: subtitleStyle,
         onProgress: setProgress,
+        preferMp4: mp4,
       });
 
-      let finalBlob: Blob = webm;
-      if (mp4) {
+      // If the browser recorded MP4 natively (hardware-encoded), it's
+      // already done — only fall back to the slow FFmpeg/WASM conversion
+      // when the recording came out as WebM but MP4 was requested.
+      const alreadyMp4 = recorded.mimeType.startsWith('video/mp4');
+      let finalBlob: Blob = recorded.blob;
+      if (mp4 && !alreadyMp4) {
         setStage('converting');
         setProgress(0);
-        finalBlob = await webmToMp4(webm, setProgress);
+        finalBlob = await webmToMp4(recorded.blob, setProgress);
       }
+      setOutputExt(finalBlob.type.startsWith('video/mp4') ? 'mp4' : 'webm');
       setUrl(URL.createObjectURL(finalBlob));
       setStage('done');
     } catch (e) {
@@ -84,7 +91,7 @@ export function ExportPanel() {
       {url && stage === 'done' && (
         <a
           href={url}
-          download={mp4 ? 'video.mp4' : 'video.webm'}
+          download={`video.${outputExt}`}
           className="rounded-lg border border-accent px-4 py-2 text-center text-sm font-medium text-accent hover:bg-accent-soft"
         >
           הורדת הסרטון המוכן

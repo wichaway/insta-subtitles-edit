@@ -8,14 +8,23 @@ interface RenderOptions {
   cues: SubtitleCue[];
   style: SubtitleStyle;
   onProgress: (fraction: number) => void;
+  /** When true, prefer recording MP4 natively (hardware-encoded) over WebM. */
+  preferMp4: boolean;
 }
 
-function pickMimeType(): string {
-  const candidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-  ];
+interface RecordResult {
+  blob: Blob;
+  mimeType: string;
+}
+
+function pickMimeType(preferMp4: boolean): string {
+  // Where supported (recent Chrome/Safari on mobile), MediaRecorder can
+  // record MP4 directly using the phone's hardware encoder — dramatically
+  // faster and lighter than the FFmpeg/libx264 WASM software encode we'd
+  // otherwise need to run afterwards to get an MP4.
+  const mp4Candidates = ['video/mp4;codecs=avc1,mp4a', 'video/mp4;codecs=h264,aac', 'video/mp4'];
+  const webmCandidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  const candidates = preferMp4 ? [...mp4Candidates, ...webmCandidates] : webmCandidates;
   return candidates.find((c) => MediaRecorder.isTypeSupported(c)) ?? 'video/webm';
 }
 
@@ -35,16 +44,16 @@ async function acquireWakeLock(): Promise<WakeLockSentinel | null> {
   }
 }
 
-export async function renderToWebm(opts: RenderOptions): Promise<Blob> {
+export async function renderVideo(opts: RenderOptions): Promise<RecordResult> {
   const wakeLock = await acquireWakeLock();
   try {
-    return await recordWebm(opts);
+    return await record(opts);
   } finally {
     await wakeLock?.release().catch(() => {});
   }
 }
 
-async function recordWebm(opts: RenderOptions): Promise<Blob> {
+async function record(opts: RenderOptions): Promise<RecordResult> {
   const canvas = document.createElement('canvas');
   const audioCtx = new AudioContext();
   const destination = audioCtx.createMediaStreamDestination();
@@ -68,8 +77,9 @@ async function recordWebm(opts: RenderOptions): Promise<Blob> {
   const videoStream = canvas.captureStream(30);
   const combined = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
 
+  const mimeType = pickMimeType(opts.preferMp4);
   const recorder = new MediaRecorder(combined, {
-    mimeType: pickMimeType(),
+    mimeType,
     videoBitsPerSecond: 6_000_000,
   });
   const chunks: Blob[] = [];
@@ -78,7 +88,7 @@ async function recordWebm(opts: RenderOptions): Promise<Blob> {
   };
 
   const done = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
   });
 
   compositor.seek(0);
@@ -100,5 +110,5 @@ async function recordWebm(opts: RenderOptions): Promise<Blob> {
   const blob = await done;
   compositor.destroy();
   audioCtx.close();
-  return blob;
+  return { blob, mimeType };
 }
