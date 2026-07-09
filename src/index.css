@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@import "@fontsource/rubik/400.css";
+@import "@fontsource/rubik/500.css";
+@import "@fontsource/rubik/600.css";
+@import "@fontsource/rubik/700.css";
+
+@theme {
+  --font-sans: "Rubik", -apple-system, "Segoe UI", Arial, sans-serif;
+
+  --color-bg: #121214;
+  --color-surface: #19191c;
+  --color-surface-2: #212125;
+  --color-border: #2c2c31;
+  --color-text: #eceef0;
+  --color-muted: #8b8b93;
+  --color-accent: #ff7a45;
+  --color-accent-soft: #3a2418;
+  --color-ok: #4ade80;
+  --color-danger: #f87171;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+#root {
+  min-height: 100svh;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 999px;
+}
+
+* {
+  scrollbar-color: var(--color-border) transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+input[type="range"] {
+  accent-color: var(--color-accent);
+}
