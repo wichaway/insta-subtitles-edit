@@ -13,7 +13,7 @@ interface CompositorOptions {
   onEnded?: () => void;
 }
 
-const SEEK_DRIFT_TOLERANCE = 0.12;
+const SEEK_DRIFT_TOLERANCE = 0.25;
 
 export class Compositor {
   private canvas: HTMLCanvasElement;
@@ -186,6 +186,31 @@ export class Compositor {
     const dt = this.lastTs ? (ts - this.lastTs) / 1000 : 0;
     this.lastTs = ts;
     this.t += dt;
+
+    // While playing, slave the compositor clock to the active clip's own
+    // media clock instead of letting the two run independently. Two free-
+    // running clocks inevitably drift; every time drift crossed the seek
+    // tolerance the old code force-seeked the video, and on iOS each seek
+    // interrupts the decoder (keyframe jump + re-decode), stalling it so
+    // the video fell further behind and got seeked again — a seek storm
+    // that capped effective decode at ~4fps on-device (frames=34 over 9s
+    // in the debug readout) and showed up as constant judder. With the
+    // video as master, drift stays ~0 and playback-time seeks vanish.
+    const activeNow = activeFramesAt(this.opts.getSegments(), this.t);
+    const primary = activeNow[0];
+    if (primary) {
+      const el = this.videoEls.get(primary.segment.clip.id);
+      if (el && !el.paused && el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        const videoT = primary.segment.globalStart + (el.currentTime - primary.segment.clip.trimStart);
+        // Only adopt the video clock when it broadly agrees with ours —
+        // right after a segment transition the element may not have
+        // started playing from its in-point yet.
+        if (Math.abs(videoT - this.t) < 0.5) {
+          this.t = videoT;
+        }
+      }
+    }
+
     const dur = this.duration;
     const ended = this.t >= dur;
     if (ended) this.t = dur;
