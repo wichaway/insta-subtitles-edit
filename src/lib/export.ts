@@ -55,6 +55,18 @@ export async function renderVideo(opts: RenderOptions): Promise<RecordResult> {
 
 async function record(opts: RenderOptions): Promise<RecordResult> {
   const canvas = document.createElement('canvas');
+  // The export canvas (and the source videos the compositor parks behind
+  // it) must be genuinely visible on screen: iOS Safari fully suppresses
+  // video frame decoding for elements it considers invisible, which turned
+  // exports into a slideshow. Shown as a small floating live-render
+  // preview — doubles as export progress feedback.
+  const overlay = document.createElement('div');
+  overlay.style.cssText =
+    'position:fixed;bottom:12px;left:12px;width:120px;z-index:9999;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,0.25);box-shadow:0 4px 16px rgba(0,0,0,0.5);pointer-events:none;';
+  canvas.style.cssText = 'display:block;width:100%;height:auto;';
+  overlay.appendChild(canvas);
+  document.body.appendChild(overlay);
+
   const audioCtx = new AudioContext();
   const destination = audioCtx.createMediaStreamDestination();
 
@@ -68,47 +80,51 @@ async function record(opts: RenderOptions): Promise<RecordResult> {
     onTime: (t, duration) => opts.onProgress(duration > 0 ? t / duration : 0),
   });
 
-  // Force-create every clip's <video> element before wiring the audio graph.
-  for (const seg of opts.segments) {
-    compositor.renderAt(seg.globalStart);
-  }
-  compositor.ensureAudioGraph(audioCtx, destination);
+  try {
+    // Force-create every clip's <video> element before wiring the audio graph.
+    for (const seg of opts.segments) {
+      compositor.renderAt(seg.globalStart);
+    }
+    compositor.ensureAudioGraph(audioCtx, destination);
 
-  const videoStream = canvas.captureStream(30);
-  const combined = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
+    const videoStream = canvas.captureStream(30);
+    const combined = new MediaStream([...videoStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
 
-  const mimeType = pickMimeType(opts.preferMp4);
-  const recorder = new MediaRecorder(combined, {
-    mimeType,
-    videoBitsPerSecond: 6_000_000,
-  });
-  const chunks: Blob[] = [];
-  recorder.ondataavailable = (e) => {
-    if (e.data.size > 0) chunks.push(e.data);
-  };
-
-  const done = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
-  });
-
-  compositor.seek(0);
-  recorder.start(250);
-  compositor.play();
-
-  await new Promise<void>((resolve) => {
-    const check = () => {
-      if (!compositor.isPlaying()) {
-        resolve();
-      } else {
-        requestAnimationFrame(check);
-      }
+    const mimeType = pickMimeType(opts.preferMp4);
+    const recorder = new MediaRecorder(combined, {
+      mimeType,
+      videoBitsPerSecond: 6_000_000,
+    });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
     };
-    requestAnimationFrame(check);
-  });
 
-  recorder.stop();
-  const blob = await done;
-  compositor.destroy();
-  audioCtx.close();
-  return { blob, mimeType };
+    const done = new Promise<Blob>((resolve) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+    });
+
+    compositor.seek(0);
+    recorder.start(250);
+    compositor.play();
+
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (!compositor.isPlaying()) {
+          resolve();
+        } else {
+          requestAnimationFrame(check);
+        }
+      };
+      requestAnimationFrame(check);
+    });
+
+    recorder.stop();
+    const blob = await done;
+    return { blob, mimeType };
+  } finally {
+    compositor.destroy();
+    overlay.remove();
+    audioCtx.close();
+  }
 }

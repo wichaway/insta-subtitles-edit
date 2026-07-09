@@ -46,18 +46,34 @@ export class Compositor {
     if (!ctx) throw new Error('Canvas 2D not supported');
     this.ctx = ctx;
     this.container = document.createElement('div');
-    // Genuinely on-screen (real opacity, real position), just clipped to a
-    // 1x1px corner via overflow:hidden — NOT hidden via opacity:0/off-screen
-    // positioning. iOS Safari's compositor deprioritizes actual frame
-    // *decoding* (not just data loading) for video it judges isn't really
-    // being painted, and opacity:0 still counts as "not really visible" to
-    // it — confirmed on-device: video reached readyState 4 and the rAF loop
-    // ran at a healthy rate, but playback still looked stepped/juddery,
-    // matching "canvas redrawing a stale decoded frame repeatedly" rather
-    // than a stalled loop. A real 1x1 opaque pixel is enough to get full
-    // decode priority while being visually imperceptible.
-    this.container.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;overflow:hidden;opacity:1;pointer-events:none;';
-    document.body.appendChild(this.container);
+    // iOS Safari suppresses video frame decoding entirely for elements it
+    // considers invisible — measured on-device: with the videos in a
+    // 1x1px clipped box, requestVideoFrameCallback reported exactly ONE
+    // presented frame across 12s of "playback" (the media clock advanced,
+    // no frames were decoded, canvas stayed black). opacity:0 and
+    // off-screen positioning fail the same way. The only reliable shape is
+    // making the videos genuinely visible at real size: park them directly
+    // BEHIND the canvas (same box, lower stacking order). Occlusion by the
+    // canvas doesn't count as invisible to WebKit's heuristics, and the
+    // canvas paints an opaque black background every frame, so the raw
+    // videos never actually show through.
+    const parent = this.canvas.parentElement;
+    if (parent) {
+      if (getComputedStyle(parent).position === 'static') {
+        parent.style.position = 'relative';
+      }
+      this.container.style.cssText =
+        'position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none;';
+      this.canvas.style.position = 'relative';
+      this.canvas.style.zIndex = '1';
+      parent.insertBefore(this.container, this.canvas);
+    } else {
+      // Detached canvas (shouldn't normally happen — the exporter mounts
+      // its canvas on-screen for the same visibility reason). Best effort.
+      this.container.style.cssText =
+        'position:fixed;top:0;left:0;width:100vw;height:100vh;overflow:hidden;opacity:1;pointer-events:none;z-index:-1;';
+      document.body.appendChild(this.container);
+    }
   }
 
   get duration() {
@@ -141,8 +157,17 @@ export class Compositor {
     for (const frame of frames) {
       const clip = frame.segment.clip;
       const el = this.getVideoEl(clip);
+      // Seek ONLY when the video is meaningfully off-position. The old
+      // unconditional "always seek while paused" created an infinite loop
+      // (caught via fillRect stack trace): drawFrame assigns currentTime →
+      // fires 'seeked' → redrawWhenReady calls drawFrame → assigns
+      // currentTime again → ... Each assignment restarts the seek algorithm
+      // (readyState drops below HAVE_CURRENT_DATA mid-seek), so the loop
+      // both showed black frames while paused and kept the decoder
+      // permanently busy seeking.
       const drift = Math.abs(el.currentTime - frame.localTime);
-      if (!this.playing || drift > SEEK_DRIFT_TOLERANCE || el.paused) {
+      const tolerance = this.playing ? SEEK_DRIFT_TOLERANCE : 0.01;
+      if (drift > tolerance) {
         try {
           el.currentTime = frame.localTime;
         } catch {
