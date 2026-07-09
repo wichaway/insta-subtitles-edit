@@ -41,7 +41,13 @@ function resample(input: Float32Array, fromRate: number, toRate: number): Float3
 export async function extractMergedAudio(clips: Clip[]): Promise<Float32Array> {
   const ctx = new AudioContext();
   try {
-    const parts = await Promise.all(clips.map((c) => decodeClipMono(c, ctx)));
+    // Decoded sequentially, not with Promise.all: decoding every clip's full
+    // audio track in parallel spikes memory (raw file + decoded PCM per
+    // clip, all at once) enough to crash mobile browser tabs.
+    const parts: Float32Array[] = [];
+    for (const c of clips) {
+      parts.push(await decodeClipMono(c, ctx));
+    }
     const total = parts.reduce((sum, p) => sum + p.length, 0);
     const out = new Float32Array(total);
     let offset = 0;
