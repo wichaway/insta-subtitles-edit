@@ -47,6 +47,12 @@ export function SubtitleListEditor() {
   const [groqKey, setGroqKey] = useState(() => localStorage.getItem('groq-api-key') ?? '');
   const [audioTestUrl, setAudioTestUrl] = useState<string | null>(null);
   const [audioTestBusy, setAudioTestBusy] = useState(false);
+  const [hintWords, setHintWords] = useState(() => localStorage.getItem('transcribe-hints') ?? '');
+
+  function updateHintWords(next: string) {
+    setHintWords(next);
+    localStorage.setItem('transcribe-hints', next);
+  }
 
   function updateEngine(next: Engine) {
     setEngine(next);
@@ -74,6 +80,7 @@ export function SubtitleListEditor() {
           audio,
           apiKey: groqKey.trim(),
           language: language ? (GROQ_LANGUAGE_CODES[language] ?? null) : null,
+          prompt: hintWords,
         });
       } else {
         cues = await transcribe({
@@ -174,6 +181,18 @@ export function SubtitleListEditor() {
           <p className="text-[11px] text-muted">
             מפתח חינמי (בלי כרטיס אשראי): נרשמים ב-console.groq.com ← API Keys ← Create API Key. המפתח נשמר רק
             בדפדפן שלכם, והאודיו נשלח ישירות ל-Groq לצורך התמלול.
+          </p>
+          <input
+            type="text"
+            value={hintWords}
+            onChange={(e) => updateHintWords(e.target.value)}
+            placeholder="מילים שחוזרות בסרטון: שמות, מונחים, סלנג (לא חובה)"
+            disabled={busy}
+            className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs"
+          />
+          <p className="text-[11px] text-muted">
+            רשימת מילים/שמות שסביר שנאמרים בסרטון עוזרת למודל לזהות אותם נכון — למשל שמות אנשים, מונחי ריקוד,
+            מילים באנגלית.
           </p>
         </div>
       )}

@@ -64,6 +64,12 @@ export interface GroqOptions {
   apiKey: string;
   /** ISO-639-1 code ('he', 'en') or null for auto-detect. */
   language: string | null;
+  /**
+   * Optional context hint: names/terms likely to appear in the speech.
+   * Whisper biases recognition toward vocabulary from this prompt, which
+   * substantially improves accuracy for names, slang, and domain terms.
+   */
+  prompt?: string;
 }
 
 export async function transcribeWithGroq(opts: GroqOptions): Promise<SubtitleCue[]> {
@@ -77,6 +83,7 @@ export async function transcribeWithGroq(opts: GroqOptions): Promise<SubtitleCue
   form.append('timestamp_granularities[]', 'segment');
   form.append('temperature', '0');
   if (opts.language) form.append('language', opts.language);
+  if (opts.prompt?.trim()) form.append('prompt', opts.prompt.trim());
 
   const headers = { Authorization: `Bearer ${opts.apiKey}` };
   let res: Response;
