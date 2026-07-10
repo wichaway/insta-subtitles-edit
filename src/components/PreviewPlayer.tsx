@@ -115,6 +115,16 @@ export function PreviewPlayer() {
     return () => clearInterval(id);
   }, []);
 
+  // Created lazily inside the play tap (iOS requires a user gesture to
+  // start audio) and reused across compositor rebuilds.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  useEffect(() => {
+    return () => {
+      audioCtxRef.current?.close().catch(() => {});
+      audioCtxRef.current = null;
+    };
+  }, []);
+
   function togglePlay() {
     const c = compositorRef.current;
     if (!c) return;
@@ -122,6 +132,9 @@ export function PreviewPlayer() {
       c.pause();
       setPlaying(false);
     } else {
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
+      audioCtxRef.current.resume().catch(() => {});
+      c.ensureAudioGraph(audioCtxRef.current, audioCtxRef.current.destination);
       c.play();
       setPlaying(true);
     }

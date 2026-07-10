@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useEditorStore } from '../state/store';
 import { extractMergedAudio } from '../lib/extractAudio';
 import { transcribe, type WhisperModel } from '../lib/whisper';
-import { transcribeWithGroq } from '../lib/groqTranscribe';
+import { transcribeWithGroq, encodeWav } from '../lib/groqTranscribe';
+import { WHISPER_SAMPLE_RATE } from '../lib/extractAudio';
 
 function fmt(sec: number) {
   const m = Math.floor(sec / 60);
@@ -44,6 +45,8 @@ export function SubtitleListEditor() {
     () => (localStorage.getItem('transcribe-engine') as Engine) || 'groq'
   );
   const [groqKey, setGroqKey] = useState(() => localStorage.getItem('groq-api-key') ?? '');
+  const [audioTestUrl, setAudioTestUrl] = useState<string | null>(null);
+  const [audioTestBusy, setAudioTestBusy] = useState(false);
 
   function updateEngine(next: Engine) {
     setEngine(next);
@@ -85,6 +88,22 @@ export function SubtitleListEditor() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'שגיאה בזיהוי הדיבור');
       setTranscribeStatus('error', 0);
+    }
+  }
+
+  /** Extracts the same audio sent to transcription and offers it for listening. */
+  async function handleAudioTest() {
+    setError(null);
+    setAudioTestBusy(true);
+    try {
+      const audio = await extractMergedAudio(clips);
+      const wav = encodeWav(audio, WHISPER_SAMPLE_RATE);
+      if (audioTestUrl) URL.revokeObjectURL(audioTestUrl);
+      setAudioTestUrl(URL.createObjectURL(wav));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'שגיאה בחילוץ האודיו');
+    } finally {
+      setAudioTestBusy(false);
     }
   }
 
@@ -184,10 +203,30 @@ export function SubtitleListEditor() {
 
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted">{sorted.length} כתוביות</span>
-        <button onClick={() => addCue()} className="text-xs text-accent hover:underline">
-          + הוספת כתובית ידנית
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleAudioTest}
+            disabled={clips.length === 0 || busy || audioTestBusy}
+            className="text-xs text-muted hover:text-text hover:underline disabled:opacity-40"
+            title="האזנה לאודיו בדיוק כפי שהוא נשלח לזיהוי הדיבור"
+          >
+            {audioTestBusy ? 'מחלץ אודיו…' : '🎧 בדיקת אודיו'}
+          </button>
+          <button onClick={() => addCue()} className="text-xs text-accent hover:underline">
+            + הוספת כתובית ידנית
+          </button>
+        </div>
       </div>
+
+      {audioTestUrl && (
+        <div className="flex flex-col gap-1">
+          <audio controls src={audioTestUrl} className="w-full" />
+          <p className="text-[11px] text-muted">
+            כך נשמע האודיו שנשלח לתמלול. אם הוא מקוטע/מעוות — הבעיה בחילוץ; אם הוא תקין אבל הדיבור מוסתר על ידי
+            מוזיקה — זה מה שמקשה על הזיהוי.
+          </p>
+        </div>
+      )}
 
       <div className="max-h-80 overflow-y-auto rounded-lg border border-border">
         <table className="w-full border-collapse text-xs">

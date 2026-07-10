@@ -26,6 +26,7 @@ export class Compositor {
   private t = 0;
   private playing = false;
   private audioCtx: AudioContext | null = null;
+  private audioDestination: AudioNode | null = null;
   private audioNodes = new Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>();
   private tickCount = 0;
   private lastError: string | null = null;
@@ -124,6 +125,7 @@ export class Compositor {
 
       this.container.appendChild(el);
       this.videoEls.set(clip.id, el);
+      this.wireAudio(clip.id, el);
 
       if ('requestVideoFrameCallback' in videoEl) {
         this.presentedFrames.set(clip.id, 0);
@@ -139,18 +141,29 @@ export class Compositor {
     return el;
   }
 
-  /** Routes every clip's audio through a WebAudio graph so we can crossfade volume and, for export, tap a MediaStream. */
-  ensureAudioGraph(audioCtx: AudioContext, destination: MediaStreamAudioDestinationNode) {
+  /**
+   * Routes every clip's audio through a WebAudio graph so we can crossfade
+   * volume. For export the destination is a MediaStreamAudioDestinationNode
+   * (tapped by MediaRecorder); for the live preview it's the context's
+   * speakers destination. Video elements created after this call (clips
+   * whose segment first becomes active mid-playback) are wired on creation.
+   */
+  ensureAudioGraph(audioCtx: AudioContext, destination: AudioNode) {
     this.audioCtx = audioCtx;
+    this.audioDestination = destination;
     for (const [id, el] of this.videoEls) {
-      if (this.audioNodes.has(id)) continue;
-      el.muted = false;
-      const source = audioCtx.createMediaElementSource(el);
-      const gain = audioCtx.createGain();
-      gain.gain.value = 0;
-      source.connect(gain).connect(destination);
-      this.audioNodes.set(id, { source, gain });
+      this.wireAudio(id, el);
     }
+  }
+
+  private wireAudio(clipId: string, el: HTMLVideoElement) {
+    if (!this.audioCtx || !this.audioDestination || this.audioNodes.has(clipId)) return;
+    el.muted = false;
+    const source = this.audioCtx.createMediaElementSource(el);
+    const gain = this.audioCtx.createGain();
+    gain.gain.value = 0;
+    source.connect(gain).connect(this.audioDestination);
+    this.audioNodes.set(clipId, { source, gain });
   }
 
   private setVolume(clipId: string, alpha: number) {
@@ -287,6 +300,16 @@ export class Compositor {
     this.playing = true;
     this.lastTs = 0;
     this.audioCtx?.resume();
+    // Gesture-activate every clip's media element while still inside the
+    // user's tap: iOS only allows unmuted playback for elements whose
+    // play() was first called from a user gesture, and clips further down
+    // the timeline would otherwise get their first play() from the rAF
+    // loop. Inactive clips are paused again by the next drawFrame, and
+    // their gains sit at 0, so nothing is heard from them.
+    for (const seg of this.opts.getSegments()) {
+      const el = this.getVideoEl(seg.clip);
+      if (el.paused) el.play().catch(() => {});
+    }
     this.rafId = requestAnimationFrame(this.tick);
   }
 

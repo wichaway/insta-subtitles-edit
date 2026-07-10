@@ -31,7 +31,7 @@ function makeId() {
 }
 
 /** Encodes mono float32 PCM as a 16-bit WAV blob (what the API expects). */
-function encodeWav(samples: Float32Array, sampleRate: number): Blob {
+export function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
   const writeStr = (offset: number, s: string) => {
