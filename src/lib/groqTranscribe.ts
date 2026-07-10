@@ -6,7 +6,9 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 // Dev-server proxy fallback (see vite.config.ts) in case the direct
 // cross-origin call is blocked in some browser/CORS combination.
 const GROQ_PROXY_URL = '/groq/openai/v1/audio/transcriptions';
-const MODEL = 'whisper-large-v3-turbo';
+// Full large-v3, not the turbo variant: turbo trades multilingual accuracy
+// for speed and is noticeably weaker on Hebrew. Both are on Groq's free tier.
+const MODEL = 'whisper-large-v3';
 
 interface GroqWord {
   word: string;
