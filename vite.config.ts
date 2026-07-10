@@ -16,6 +16,15 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
+    proxy: {
+      // Same-origin fallback for the Groq transcription API, in case the
+      // browser blocks the direct cross-origin call (see groqTranscribe.ts).
+      '/groq': {
+        target: 'https://api.groq.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/groq/, ''),
+      },
+    },
   },
   preview: {
     headers: {

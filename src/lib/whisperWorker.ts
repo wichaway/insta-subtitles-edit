@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import { pipeline, env } from '@xenova/transformers';
+import { groupIntoCues } from './cueGrouping';
 
 env.allowLocalModels = false;
 
@@ -42,38 +43,10 @@ self.onmessage = async (e: MessageEvent) => {
     });
 
     const chunks: { text: string; timestamp: [number, number | null] }[] = result.chunks ?? [];
-    const cues = groupIntoCues(chunks);
+    const cues = groupIntoCues(chunks.map((c) => ({ text: c.text, start: c.timestamp[0], end: c.timestamp[1] })));
     postMessage({ type: 'done', cues });
   } catch (err) {
     postMessage({ type: 'error', message: err instanceof Error ? err.message : String(err) });
   }
 };
 
-/** Groups word-level timestamps into readable subtitle cues (~6 words / ~4s per cue). */
-function groupIntoCues(words: { text: string; timestamp: [number, number | null] }[]) {
-  const cues: { text: string; start: number; end: number }[] = [];
-  const MAX_WORDS = 7;
-  const MAX_SPAN = 4.2;
-  let bucket: typeof words = [];
-
-  const flush = () => {
-    if (bucket.length === 0) return;
-    const start = bucket[0].timestamp[0];
-    const last = bucket[bucket.length - 1];
-    const end = last.timestamp[1] ?? last.timestamp[0] + 0.5;
-    cues.push({ text: bucket.map((w) => w.text.trim()).join(' ').trim(), start, end });
-    bucket = [];
-  };
-
-  for (const w of words) {
-    if (w.timestamp[0] == null) continue;
-    const bucketStart = bucket[0]?.timestamp[0] ?? w.timestamp[0];
-    const wouldSpan = (w.timestamp[1] ?? w.timestamp[0]) - bucketStart;
-    if (bucket.length >= MAX_WORDS || wouldSpan > MAX_SPAN || /[.!?…]$/.test(bucket[bucket.length - 1]?.text ?? '')) {
-      flush();
-    }
-    bucket.push(w);
-  }
-  flush();
-  return cues;
-}

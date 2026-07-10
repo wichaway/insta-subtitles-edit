@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useEditorStore } from '../state/store';
 import { extractMergedAudio } from '../lib/extractAudio';
 import { transcribe, type WhisperModel } from '../lib/whisper';
+import { transcribeWithGroq } from '../lib/groqTranscribe';
 
 function fmt(sec: number) {
   const m = Math.floor(sec / 60);
@@ -14,6 +15,14 @@ const LANGUAGES: { code: string | null; label: string }[] = [
   { code: 'hebrew', label: 'עברית' },
   { code: 'english', label: 'אנגלית' },
 ];
+
+/** transformers.js takes full language names; the Groq API takes ISO-639-1. */
+const GROQ_LANGUAGE_CODES: Record<string, string> = {
+  hebrew: 'he',
+  english: 'en',
+};
+
+type Engine = 'browser' | 'groq';
 
 export function SubtitleListEditor() {
   const clips = useEditorStore((s) => s.clips);
@@ -31,18 +40,46 @@ export function SubtitleListEditor() {
   const [model, setModel] = useState<WhisperModel>('base');
   const [language, setLanguage] = useState<string | null>('hebrew');
   const [error, setError] = useState<string | null>(null);
+  const [engine, setEngine] = useState<Engine>(
+    () => (localStorage.getItem('transcribe-engine') as Engine) || 'groq'
+  );
+  const [groqKey, setGroqKey] = useState(() => localStorage.getItem('groq-api-key') ?? '');
+
+  function updateEngine(next: Engine) {
+    setEngine(next);
+    localStorage.setItem('transcribe-engine', next);
+  }
+
+  function updateGroqKey(next: string) {
+    setGroqKey(next);
+    localStorage.setItem('groq-api-key', next);
+  }
 
   async function handleGenerate() {
     setError(null);
+    if (engine === 'groq' && !groqKey.trim()) {
+      setError('כדי להשתמש בתמלול הענן צריך להדביק מפתח API של Groq (חינם) בשדה למטה');
+      return;
+    }
     try {
       setTranscribeStatus('loading-model', 0);
       const audio = await extractMergedAudio(clips);
-      const cues = await transcribe({
-        audio,
-        model,
-        language,
-        onProgress: (fraction, status) => setTranscribeStatus(status, fraction),
-      });
+      let cues;
+      if (engine === 'groq') {
+        setTranscribeStatus('transcribing', 0.3);
+        cues = await transcribeWithGroq({
+          audio,
+          apiKey: groqKey.trim(),
+          language: language ? (GROQ_LANGUAGE_CODES[language] ?? null) : null,
+        });
+      } else {
+        cues = await transcribe({
+          audio,
+          model,
+          language,
+          onProgress: (fraction, status) => setTranscribeStatus(status, fraction),
+        });
+      }
       setSubtitles(cues);
       setTranscribeStatus('done', 1);
     } catch (e) {
@@ -60,6 +97,16 @@ export function SubtitleListEditor() {
         <h2 className="text-sm font-semibold">כתוביות</h2>
         <div className="flex flex-wrap items-center gap-2">
           <select
+            value={engine}
+            onChange={(e) => updateEngine(e.target.value as Engine)}
+            className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs"
+            disabled={busy}
+            title="תמלול ענן (Groq) מדויק בהרבה לעברית; תמלול בדפדפן עובד בלי אינטרנט ובלי מפתח"
+          >
+            <option value="groq">☁️ תמלול ענן (מדויק, חינם)</option>
+            <option value="browser">💻 תמלול בדפדפן (פרטי)</option>
+          </select>
+          <select
             value={language ?? ''}
             onChange={(e) => setLanguage(e.target.value || null)}
             className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs"
@@ -71,16 +118,18 @@ export function SubtitleListEditor() {
               </option>
             ))}
           </select>
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value as WhisperModel)}
-            className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs"
-            disabled={busy}
-            title="מודל גדול יותר = דיוק גבוה יותר אך איטי יותר"
-          >
-            <option value="base">מודל מהיר</option>
-            <option value="small">מודל מדויק (איטי יותר)</option>
-          </select>
+          {engine === 'browser' && (
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value as WhisperModel)}
+              className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs"
+              disabled={busy}
+              title="מודל גדול יותר = דיוק גבוה יותר אך איטי יותר"
+            >
+              <option value="base">מודל מהיר</option>
+              <option value="small">מודל מדויק (איטי יותר)</option>
+            </select>
+          )}
           <button
             onClick={handleGenerate}
             disabled={clips.length === 0 || busy}
@@ -91,6 +140,25 @@ export function SubtitleListEditor() {
         </div>
       </div>
 
+      {engine === 'groq' && (
+        <div className="flex flex-col gap-1">
+          <input
+            type="password"
+            dir="ltr"
+            value={groqKey}
+            onChange={(e) => updateGroqKey(e.target.value)}
+            placeholder="gsk_... (מפתח API של Groq)"
+            disabled={busy}
+            autoComplete="off"
+            className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs"
+          />
+          <p className="text-[11px] text-muted">
+            מפתח חינמי (בלי כרטיס אשראי): נרשמים ב-console.groq.com ← API Keys ← Create API Key. המפתח נשמר רק
+            בדפדפן שלכם, והאודיו נשלח ישירות ל-Groq לצורך התמלול.
+          </p>
+        </div>
+      )}
+
       {busy && (
         <div className="flex flex-col gap-1">
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
@@ -100,7 +168,11 @@ export function SubtitleListEditor() {
             />
           </div>
           <p className="text-[11px] text-muted">
-            {transcribeStatus === 'loading-model' ? 'טוען מודל זיהוי דיבור (פעם ראשונה עלולה לקחת זמן)…' : 'מתמלל…'}
+            {transcribeStatus === 'loading-model'
+              ? engine === 'groq'
+                ? 'מחלץ אודיו מהסרטון…'
+                : 'טוען מודל זיהוי דיבור (פעם ראשונה עלולה לקחת זמן)…'
+              : 'מתמלל…'}
           </p>
         </div>
       )}
