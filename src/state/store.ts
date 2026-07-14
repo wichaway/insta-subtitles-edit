@@ -120,7 +120,8 @@ export const useEditorStore = create<EditorState>((set) => ({
       // Pieces of a split clip share one object URL; only revoke it once the
       // last clip referencing it is gone.
       if (clip && !clips.some((c) => c.url === clip.url)) URL.revokeObjectURL(clip.url);
-      return { clips };
+      const selectedClipId = s.selectedClipId === id ? null : s.selectedClipId;
+      return { clips, selectedClipId };
     });
   },
 
