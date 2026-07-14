@@ -33,6 +33,7 @@ export function PreviewPlayer() {
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
   const seekRequest = useEditorStore((s) => s.seekRequest);
   const consumeSeekRequest = useEditorStore((s) => s.consumeSeekRequest);
+  const splitClipAtGlobalTime = useEditorStore((s) => s.splitClipAtGlobalTime);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const compositorRef = useRef<Compositor | null>(null);
@@ -47,6 +48,12 @@ export function PreviewPlayer() {
   const dims = FORMAT_DIMENSIONS[format];
 
   const preview = previewDims(dims.w, dims.h);
+
+  // Mirrors the MIN_SPLIT_PIECE guard in splitClipAtGlobalTime, so the button
+  // disables exactly when a split at the playhead would be a no-op.
+  const canSplit = buildTimeline(clips, crossfade).some(
+    (seg) => t > seg.globalStart + 0.05 && t < seg.globalEnd - 0.05
+  );
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -176,6 +183,15 @@ export function PreviewPlayer() {
             aria-label={playing ? 'השהה' : 'נגן'}
           >
             {playing ? '❚❚' : '▶'}
+          </button>
+          <button
+            onClick={() => splitClipAtGlobalTime(t)}
+            disabled={!canSplit}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border bg-surface-2 text-text disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="פצל קליפ בנקודת הנגן"
+            title="פצל קליפ בנקודת הנגן"
+          >
+            ✂
           </button>
           <input
             type="range"

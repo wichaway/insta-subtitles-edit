@@ -65,6 +65,23 @@ export function activeFramesAt(segments: TimelineSegment[], t: number): ActiveFr
   return [];
 }
 
+/**
+ * Inverse of the clip→global mapping buildTimeline performs: converts a time
+ * within a clip's source file (`localTime`, seconds) to its position on the
+ * merged timeline, clamped to the clip's segment. Returns null if the clip
+ * isn't in the timeline.
+ */
+export function clipLocalToGlobalTime(
+  segments: TimelineSegment[],
+  clipId: string,
+  localTime: number
+): number | null {
+  const seg = segments.find((s) => s.clip.id === clipId);
+  if (!seg) return null;
+  const t = seg.globalStart + (localTime - seg.clip.trimStart);
+  return Math.min(Math.max(t, seg.globalStart), seg.globalEnd);
+}
+
 export function findCueAt(cues: { start: number; end: number }[], t: number) {
   return cues.filter((c) => t >= c.start && t < c.end);
 }

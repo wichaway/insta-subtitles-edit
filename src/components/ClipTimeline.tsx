@@ -10,7 +10,7 @@ import { SortableContext, horizontalListSortingStrategy, useSortable } from '@dn
 import { CSS } from '@dnd-kit/utilities';
 import { useEditorStore } from '../state/store';
 import type { Clip } from '../lib/types';
-import { clipDuration } from '../lib/timeline';
+import { buildTimeline, clipDuration, clipLocalToGlobalTime } from '../lib/timeline';
 import { UploadZone } from './UploadZone';
 
 function fmt(sec: number) {
@@ -25,6 +25,16 @@ function ClipCard({ clip, index }: { clip: Clip; index: number }) {
   const removeClip = useEditorStore((s) => s.removeClip);
   const trimClip = useEditorStore((s) => s.trimClip);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: clip.id });
+
+  // Applies the trim, then seeks the main preview to the frame being trimmed
+  // to, so the user sees it live while dragging the slider. Reads the store
+  // post-update so the global position reflects the trim just applied.
+  function trimWithPreview(trimStart: number, trimEnd: number, previewLocalTime: number) {
+    trimClip(clip.id, trimStart, trimEnd);
+    const { clips, crossfade, requestSeek } = useEditorStore.getState();
+    const globalTime = clipLocalToGlobalTime(buildTimeline(clips, crossfade), clip.id, previewLocalTime);
+    if (globalTime != null) requestSeek(globalTime);
+  }
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -71,7 +81,10 @@ function ClipCard({ clip, index }: { clip: Clip; index: number }) {
           max={clip.duration}
           step={0.1}
           value={clip.trimStart}
-          onChange={(e) => trimClip(clip.id, Math.min(Number(e.target.value), clip.trimEnd - 0.2), clip.trimEnd)}
+          onChange={(e) => {
+            const trimStart = Math.min(Number(e.target.value), clip.trimEnd - 0.2);
+            trimWithPreview(trimStart, clip.trimEnd, trimStart);
+          }}
         />
         <input
           type="range"
@@ -79,7 +92,10 @@ function ClipCard({ clip, index }: { clip: Clip; index: number }) {
           max={clip.duration}
           step={0.1}
           value={clip.trimEnd}
-          onChange={(e) => trimClip(clip.id, clip.trimStart, Math.max(Number(e.target.value), clip.trimStart + 0.2))}
+          onChange={(e) => {
+            const trimEnd = Math.max(Number(e.target.value), clip.trimStart + 0.2);
+            trimWithPreview(clip.trimStart, trimEnd, trimEnd);
+          }}
         />
         <p className="text-center text-[11px] text-muted tabular-nums">משך: {fmt(clipDuration(clip))}</p>
       </div>

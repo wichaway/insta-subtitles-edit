@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 import type { Clip, SubtitleCue, SubtitleStyle, TranscribeStatus } from '../lib/types';
+import { buildTimeline } from '../lib/timeline';
+
+/** A split may not leave either resulting piece shorter than this, seconds. */
+const MIN_SPLIT_PIECE = 0.05;
 
 function makeId() {
   return Math.random().toString(36).slice(2, 10);
@@ -44,6 +48,7 @@ interface EditorState {
   removeClip: (id: string) => void;
   reorderClips: (fromId: string, toId: string) => void;
   trimClip: (id: string, trimStart: number, trimEnd: number) => void;
+  splitClipAtGlobalTime: (globalTime: number) => void;
   setCrossfade: (seconds: number) => void;
   setFormat: (format: Format) => void;
   selectClip: (id: string | null) => void;
@@ -74,7 +79,7 @@ function loadMeta(file: File): Promise<{ duration: number; width: number; height
   });
 }
 
-export const useEditorStore = create<EditorState>((set, get) => ({
+export const useEditorStore = create<EditorState>((set) => ({
   clips: [],
   crossfade: 0.6,
   format: '9:16',
@@ -109,9 +114,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   removeClip: (id) => {
-    const clip = get().clips.find((c) => c.id === id);
-    if (clip) URL.revokeObjectURL(clip.url);
-    set((s) => ({ clips: s.clips.filter((c) => c.id !== id) }));
+    set((s) => {
+      const clip = s.clips.find((c) => c.id === id);
+      const clips = s.clips.filter((c) => c.id !== id);
+      // Pieces of a split clip share one object URL; only revoke it once the
+      // last clip referencing it is gone.
+      if (clip && !clips.some((c) => c.url === clip.url)) URL.revokeObjectURL(clip.url);
+      return { clips };
+    });
   },
 
   reorderClips: (fromId, toId) => {
@@ -130,6 +140,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((s) => ({
       clips: s.clips.map((c) => (c.id === id ? { ...c, trimStart, trimEnd } : c)),
     }));
+  },
+
+  splitClipAtGlobalTime: (globalTime) => {
+    set((s) => {
+      const segments = buildTimeline(s.clips, s.crossfade);
+      const seg = segments.find(
+        (sg) =>
+          globalTime > sg.globalStart + MIN_SPLIT_PIECE && globalTime < sg.globalEnd - MIN_SPLIT_PIECE
+      );
+      if (!seg) return s;
+      const localTime = seg.clip.trimStart + (globalTime - seg.globalStart);
+      const left: Clip = { ...seg.clip, id: makeId(), trimEnd: localTime };
+      const right: Clip = { ...seg.clip, id: makeId(), trimStart: localTime };
+      const clips = [...s.clips];
+      clips.splice(seg.clipIndex, 1, left, right);
+      const selectedClipId = s.selectedClipId === seg.clip.id ? left.id : s.selectedClipId;
+      return { clips, selectedClipId };
+    });
   },
 
   setCrossfade: (seconds) => set({ crossfade: Math.max(0, seconds) }),
