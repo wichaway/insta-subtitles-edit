@@ -1,5 +1,5 @@
 import type { Clip, SubtitleCue, SubtitleStyle, TimelineSegment } from './types';
-import { activeFramesAt, totalDuration } from './timeline';
+import { activeFramesAt, totalDuration, type ActiveFrame } from './timeline';
 import { drawSubtitle } from './subtitleRender';
 
 interface CompositorOptions {
@@ -14,6 +14,13 @@ interface CompositorOptions {
 }
 
 const SEEK_DRIFT_TOLERANCE = 0.25;
+
+/**
+ * How far ahead (seconds) the next clip's <video> is prepared before its
+ * segment starts. Long enough to cover a keyframe jump + decode on a slow
+ * phone, short enough that we never hold more than one extra decoder warm.
+ */
+const PREROLL_LOOKAHEAD = 1.5;
 
 export class Compositor {
   private canvas: HTMLCanvasElement;
@@ -30,6 +37,7 @@ export class Compositor {
   private audioNodes = new Map<string, { source: MediaElementAudioSourceNode; gain: GainNode }>();
   private tickCount = 0;
   private lastError: string | null = null;
+  private hasPainted = false;
   // Counts genuinely new decoded frames per clip via requestVideoFrameCallback
   // (NOT currentTime — that's a continuously-advancing presentation clock and
   // keeps moving even when the decoder hasn't produced a new frame yet, so
@@ -109,6 +117,18 @@ export class Compositor {
       // 'loadeddata' listener above then paints it.
       const videoEl = el;
       const primeFirstFrame = () => {
+        // Park on the clip's in-point so the first frame the decoder
+        // produces is the one a transition will actually need. Matters most
+        // for pieces of a split clip, whose in-point is far from 0 — left at
+        // 0, the element got its first seek at the exact transition moment
+        // and the cut showed a stale frame from the wrong position.
+        if (Math.abs(videoEl.currentTime - clip.trimStart) > 0.05) {
+          try {
+            videoEl.currentTime = clip.trimStart;
+          } catch {
+            /* ignore seeks before metadata is ready */
+          }
+        }
         if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
         videoEl
           .play()
@@ -173,11 +193,33 @@ export class Compositor {
     }
   }
 
-  private drawFrame() {
-    const { ctx, canvas } = this;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Parks the nearest upcoming clip's element on its in-point frame while
+  // the current clip is still playing, so the decoder has the incoming
+  // frame ready before the transition. Without this, the incoming <video>
+  // got its first seek at the exact transition moment; the keyframe jump +
+  // re-decode takes a few frames, which showed up as a stale frame from the
+  // wrong position (or a black flash) at every cut and crossfade start.
+  private prerollUpcoming(segments: TimelineSegment[]) {
+    for (const seg of segments) {
+      if (seg.globalStart <= this.t) continue;
+      if (seg.globalStart - this.t > PREROLL_LOOKAHEAD) break;
+      const el = this.getVideoEl(seg.clip);
+      if (
+        !el.seeking &&
+        el.readyState >= HTMLMediaElement.HAVE_METADATA &&
+        Math.abs(el.currentTime - seg.clip.trimStart) > 0.05
+      ) {
+        try {
+          el.currentTime = seg.clip.trimStart;
+        } catch {
+          /* ignore seeks before metadata is ready */
+        }
+      }
+      break; // only the nearest upcoming segment needs warming
+    }
+  }
 
+  private drawFrame() {
     const segments = this.opts.getSegments();
     const frames = activeFramesAt(segments, this.t);
     const activeIds = new Set(frames.map((f) => f.segment.clip.id));
@@ -189,6 +231,7 @@ export class Compositor {
       }
     }
 
+    const paintable: { frame: ActiveFrame; el: HTMLVideoElement }[] = [];
     for (const frame of frames) {
       const clip = frame.segment.clip;
       const el = this.getVideoEl(clip);
@@ -223,11 +266,35 @@ export class Compositor {
       // that throw aborts drawFrame() before it returns, which (when called
       // from the rAF loop in tick()) skips the requestAnimationFrame call
       // that reschedules the next frame — permanently freezing playback
-      // from one transient hiccup.
-      if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        ctx.globalAlpha = frame.alpha;
-        drawContain(ctx, el, clip.width, clip.height, canvas.width, canvas.height);
+      // from one transient hiccup. And while a seek is in flight
+      // (el.seeking), the element still holds the pre-seek frame — painting
+      // it would flash a frame from the wrong position — so mid-seek counts
+      // as not paintable too.
+      if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !el.seeking) {
+        paintable.push({ frame, el });
       }
+    }
+
+    if (this.playing) this.prerollUpcoming(segments);
+
+    // Transition hiccup: media exists at this time but none of it can be
+    // painted at the right position yet (decoder mid-seek or still warming
+    // up). Hold the previous canvas contents — freezing the last good frame
+    // for a frame or two reads as a clean cut, where clearing would flash
+    // black. Only once something has been painted, though: the canvas starts
+    // transparent, and before the first opaque fill the raw <video> elements
+    // parked behind it would show through.
+    if (frames.length > 0 && paintable.length === 0 && this.hasPainted) return;
+
+    const { ctx, canvas } = this;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    this.hasPainted = true;
+
+    for (const { frame, el } of paintable) {
+      const clip = frame.segment.clip;
+      ctx.globalAlpha = frame.alpha;
+      drawContain(ctx, el, clip.width, clip.height, canvas.width, canvas.height);
     }
     ctx.globalAlpha = 1;
 

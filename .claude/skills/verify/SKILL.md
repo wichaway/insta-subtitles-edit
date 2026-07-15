@@ -41,3 +41,9 @@ npm run dev -- --port 5199 --strictPort   # dev server (background)
   readout), toolbar shows חתוך כאן / מחק קטע + trim sliders.
 - Cut / delete / trim / drag-reorder on the strip; crossfade input at 0.
 - Watch `page.on('pageerror')` — zustand/React errors surface there.
+- Transition smoothness: play across a clip boundary while sampling canvas
+  pixels each rAF via `ctx.getImageData` (the moving white bar in the
+  generated clips makes stale frames detectable as backward jumps; solid
+  colors make black flashes detectable). Note: tiny local VP8 clips decode
+  near-instantly, so decoder-latency glitches reproduce weaker here than on
+  phone H.264 footage.
