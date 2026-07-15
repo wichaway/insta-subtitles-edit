@@ -23,6 +23,19 @@ const SEEK_DRIFT_TOLERANCE = 0.25;
 const PREROLL_LOOKAHEAD = 1.5;
 
 /**
+ * How long (seconds) before its segment starts the upcoming clip begins
+ * playing silently behind the scenes, offset back in its source so it
+ * reaches its in-point exactly at the junction. By then the decoder is
+ * genuinely hot and the media clock already running, so the switch is
+ * seamless — a parked-but-paused element still pays a visible spin-up
+ * pause on phones when play() is only called at the junction itself.
+ * Only possible when the clip has content before its in-point
+ * (trimStart > 0 — split pieces and trimmed clips, exactly the slow,
+ * non-keyframe in-points that need it).
+ */
+const PREPLAY_LEAD = 0.4;
+
+/**
  * How far backward (seconds) the timeline clock may be pulled to wait for
  * the active clip's media clock — covers decoder spin-up at a junction.
  */
@@ -50,6 +63,9 @@ export class Compositor {
   // Last observed position of the clip currently driving the timeline
   // clock, used to detect a media clock that has stopped advancing.
   private clockRef: { clipId: string; videoT: number; wallTs: number } | null = null;
+  // Clip currently playing silently ahead of its segment (see PREPLAY_LEAD);
+  // exempt from the pause-inactive sweep in drawFrame.
+  private preplayingId: string | null = null;
   // Counts genuinely new decoded frames per clip via requestVideoFrameCallback
   // (NOT currentTime — that's a continuously-advancing presentation clock and
   // keeps moving even when the decoder hasn't produced a new frame yet, so
@@ -205,29 +221,71 @@ export class Compositor {
     }
   }
 
-  // Parks the nearest upcoming clip's element on its in-point frame while
-  // the current clip is still playing, so the decoder has the incoming
-  // frame ready before the transition. Without this, the incoming <video>
-  // got its first seek at the exact transition moment; the keyframe jump +
-  // re-decode takes a few frames, which showed up as a stale frame from the
-  // wrong position (or a black flash) at every cut and crossfade start.
+  // Prepares the nearest upcoming clip's element while the current clip is
+  // still playing, in two stages:
+  //
+  // 1. Preroll (up to PREROLL_LOOKAHEAD out): park the element on its
+  //    in-point frame so the decoder has the incoming frame ready before
+  //    the transition. Without this, the incoming <video> got its first
+  //    seek at the exact transition moment; the keyframe jump + re-decode
+  //    takes a few frames, which showed up as a stale frame from the wrong
+  //    position (or a black flash) at every cut and crossfade start.
+  //
+  // 2. Preplay (PREPLAY_LEAD out, when the clip has content before its
+  //    in-point): silently start playing from trimStart minus the time
+  //    left until the junction, so the element crosses its in-point at
+  //    exactly the junction with a hot decoder and a running media clock —
+  //    eliminating the visible spin-up pause at the switch.
   private prerollUpcoming(segments: TimelineSegment[]) {
+    let upcoming: TimelineSegment | null = null;
     for (const seg of segments) {
       if (seg.globalStart <= this.t) continue;
       if (seg.globalStart - this.t > PREROLL_LOOKAHEAD) break;
-      const el = this.getVideoEl(seg.clip);
-      if (
-        !el.seeking &&
-        el.readyState >= HTMLMediaElement.HAVE_METADATA &&
-        Math.abs(el.currentTime - seg.clip.trimStart) > 0.05
-      ) {
+      upcoming = seg;
+      break; // only the nearest upcoming segment needs warming
+    }
+
+    // A preplaying element that is no longer the imminent upcoming segment
+    // (user scrubbed away) and didn't become active must be silenced again.
+    if (this.preplayingId && this.preplayingId !== upcoming?.clip.id) {
+      const activeIds = new Set(activeFramesAt(segments, this.t).map((f) => f.segment.clip.id));
+      if (!activeIds.has(this.preplayingId)) {
+        const el = this.videoEls.get(this.preplayingId);
+        el?.pause();
+        this.setVolume(this.preplayingId, 0);
+      }
+      this.preplayingId = null;
+    }
+    if (!upcoming) return;
+
+    const { trimStart } = upcoming.clip;
+    const remaining = upcoming.globalStart - this.t;
+    const el = this.getVideoEl(upcoming.clip);
+    if (el.seeking || el.readyState < HTMLMediaElement.HAVE_METADATA) return;
+
+    if (remaining <= Math.min(PREPLAY_LEAD, trimStart) && el.paused && this.preplayingId !== upcoming.clip.id) {
+      const startPos = trimStart - remaining;
+      if (Math.abs(el.currentTime - startPos) > 0.1) {
         try {
-          el.currentTime = seg.clip.trimStart;
+          el.currentTime = startPos;
+        } catch {
+          return;
+        }
+      }
+      this.preplayingId = upcoming.clip.id;
+      this.setVolume(upcoming.clip.id, 0);
+      el.play().catch(() => {});
+    } else if (this.preplayingId !== upcoming.clip.id) {
+      // Preroll stage: park on the position preplay will start from (the
+      // in-point itself when there's no pre-in-point content to lead with).
+      const parkPos = Math.max(0, trimStart - PREPLAY_LEAD);
+      if (Math.abs(el.currentTime - parkPos) > 0.05) {
+        try {
+          el.currentTime = parkPos;
         } catch {
           /* ignore seeks before metadata is ready */
         }
       }
-      break; // only the nearest upcoming segment needs warming
     }
   }
 
@@ -236,8 +294,11 @@ export class Compositor {
     const frames = activeFramesAt(segments, this.t);
     const activeIds = new Set(frames.map((f) => f.segment.clip.id));
 
+    // A preplaying clip whose segment has arrived is simply active now.
+    if (this.preplayingId && activeIds.has(this.preplayingId)) this.preplayingId = null;
+
     for (const [id, el] of this.videoEls) {
-      if (!activeIds.has(id) && !el.paused) {
+      if (!activeIds.has(id) && !el.paused && id !== this.preplayingId) {
         el.pause();
         this.setVolume(id, 0);
       }
@@ -260,8 +321,21 @@ export class Compositor {
       // scratch, so on a device where a mid-file seek takes longer than the
       // drift tolerance accumulates, chasing an in-flight seek re-seeked it
       // forever and playback froze at the junction between clips.
+      //
+      // While playing, the fading-out layer of a crossfade gets a much
+      // looser tolerance than the primary clip: it should just play its
+      // tail naturally. When the timeline clock is held back waiting for
+      // the incoming clip, the outgoing element's honest clock runs ahead
+      // of the frozen timeline, and chasing it at the normal tolerance
+      // yanked it backward mid-fade — a visible stutter. The loose bound
+      // still recovers it after a scrub lands inside an overlap.
+      const isPrimary = frame === frames[0];
       const drift = Math.abs(el.currentTime - frame.localTime);
-      const tolerance = this.playing ? SEEK_DRIFT_TOLERANCE : 0.01;
+      const tolerance = !this.playing
+        ? 0.01
+        : isPrimary
+          ? SEEK_DRIFT_TOLERANCE
+          : MAX_CLOCK_HOLD_BACK + 0.5;
       if (drift > tolerance && !el.seeking) {
         try {
           el.currentTime = frame.localTime;
@@ -269,10 +343,15 @@ export class Compositor {
           /* ignore seeks before metadata is ready */
         }
       }
-      if (this.playing && el.paused) {
+      // Stop the unchased outgoing layer at its own out-point so trimmed-
+      // away content can never leak into the fade; its element pauses on
+      // the exact out-point frame, which keeps painting as it fades.
+      const outgoingDone = !isPrimary && el.currentTime >= clip.trimEnd - 0.01;
+      if (this.playing && outgoingDone) {
+        if (!el.paused) el.pause();
+      } else if (this.playing && el.paused) {
         el.play().catch(() => {});
-      }
-      if (!this.playing && !el.paused) {
+      } else if (!this.playing && !el.paused) {
         el.pause();
       }
       this.setVolume(clip.id, frame.alpha);
@@ -286,8 +365,13 @@ export class Compositor {
       // from one transient hiccup. And while a seek is in flight
       // (el.seeking), the element still holds the pre-seek frame — painting
       // it would flash a frame from the wrong position — so mid-seek counts
-      // as not paintable too.
-      if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !el.seeking) {
+      // as not paintable too. Same for an element still before its in-point
+      // (a preplay that hasn't caught up): its frame is pre-cut content.
+      if (
+        el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        !el.seeking &&
+        el.currentTime >= clip.trimStart - 0.05
+      ) {
         paintable.push({ frame, el });
       }
     }
@@ -420,6 +504,7 @@ export class Compositor {
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = null;
     this.clockRef = null;
+    this.preplayingId = null;
     for (const [id, el] of this.videoEls) {
       el.pause();
       this.setVolume(id, 0);
