@@ -22,6 +22,15 @@ const SEEK_DRIFT_TOLERANCE = 0.25;
  */
 const PREROLL_LOOKAHEAD = 1.5;
 
+/**
+ * How far backward (seconds) the timeline clock may be pulled to wait for
+ * the active clip's media clock — covers decoder spin-up at a junction.
+ */
+const MAX_CLOCK_HOLD_BACK = 2.0;
+
+/** Stop waiting on a clip whose media clock hasn't moved for this long. */
+const CLOCK_STALL_PATIENCE_MS = 2000;
+
 export class Compositor {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -38,6 +47,9 @@ export class Compositor {
   private tickCount = 0;
   private lastError: string | null = null;
   private hasPainted = false;
+  // Last observed position of the clip currently driving the timeline
+  // clock, used to detect a media clock that has stopped advancing.
+  private clockRef: { clipId: string; videoT: number; wallTs: number } | null = null;
   // Counts genuinely new decoded frames per clip via requestVideoFrameCallback
   // (NOT currentTime — that's a continuously-advancing presentation clock and
   // keeps moving even when the decoder hasn't produced a new frame yet, so
@@ -243,9 +255,14 @@ export class Compositor {
       // (readyState drops below HAVE_CURRENT_DATA mid-seek), so the loop
       // both showed black frames while paused and kept the decoder
       // permanently busy seeking.
+      // Never issue a new seek while one is still in flight (!el.seeking):
+      // each currentTime assignment restarts the seek algorithm from
+      // scratch, so on a device where a mid-file seek takes longer than the
+      // drift tolerance accumulates, chasing an in-flight seek re-seeked it
+      // forever and playback froze at the junction between clips.
       const drift = Math.abs(el.currentTime - frame.localTime);
       const tolerance = this.playing ? SEEK_DRIFT_TOLERANCE : 0.01;
-      if (drift > tolerance) {
+      if (drift > tolerance && !el.seeking) {
         try {
           el.currentTime = frame.localTime;
         } catch {
@@ -323,17 +340,35 @@ export class Compositor {
     // that capped effective decode at ~4fps on-device (frames=34 over 9s
     // in the debug readout) and showed up as constant judder. With the
     // video as master, drift stays ~0 and playback-time seeks vanish.
+    //
+    // Crucially this adoption must ALSO hold while the element is still
+    // spinning up at a junction (paused with play() pending, media clock
+    // parked at the in-point). The old ±0.5s "broad agreement" guard
+    // excluded exactly that state: on phones the incoming clip can take
+    // well over 0.5s to start, the compositor clock ran ahead past the
+    // guard, adoption never re-engaged, and the drift chase then force-
+    // seeked the new clip over and over — playback looked permanently
+    // stuck at the junction between two clips. Instead, adopt whenever the
+    // element is genuinely positioned inside its own segment, allowing the
+    // clock to be pulled back up to MAX_CLOCK_HOLD_BACK to wait for it,
+    // with a wall-clock patience limit so a clip that never starts (bad
+    // file) degrades to free-running rather than freezing the timeline.
     const activeNow = activeFramesAt(this.opts.getSegments(), this.t);
     const primary = activeNow[0];
     if (primary) {
-      const el = this.videoEls.get(primary.segment.clip.id);
-      if (el && !el.paused && el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        const videoT = primary.segment.globalStart + (el.currentTime - primary.segment.clip.trimStart);
-        // Only adopt the video clock when it broadly agrees with ours —
-        // right after a segment transition the element may not have
-        // started playing from its in-point yet.
-        if (Math.abs(videoT - this.t) < 0.5) {
-          this.t = videoT;
+      const seg = primary.segment;
+      const el = this.videoEls.get(seg.clip.id);
+      if (el && el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !el.seeking && !el.ended) {
+        const videoT = seg.globalStart + (el.currentTime - seg.clip.trimStart);
+        const inSegment = videoT >= seg.globalStart - 0.05 && videoT <= seg.globalEnd + 0.05;
+        const behind = this.t - videoT;
+        if (inSegment && behind > -0.5 && behind < MAX_CLOCK_HOLD_BACK) {
+          const ref = this.clockRef;
+          const advancing = !ref || ref.clipId !== seg.clip.id || videoT > ref.videoT + 1e-3;
+          if (advancing) this.clockRef = { clipId: seg.clip.id, videoT, wallTs: ts };
+          if (advancing || ts - this.clockRef!.wallTs < CLOCK_STALL_PATIENCE_MS) {
+            this.t = videoT;
+          }
         }
       }
     }
@@ -384,6 +419,7 @@ export class Compositor {
     this.playing = false;
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = null;
+    this.clockRef = null;
     for (const [id, el] of this.videoEls) {
       el.pause();
       this.setVolume(id, 0);
@@ -392,6 +428,9 @@ export class Compositor {
 
   seek(t: number) {
     this.t = Math.min(Math.max(0, t), this.duration);
+    // The clock-stall bookkeeping refers to the previous position; after a
+    // scrub (especially backward) it must not suppress clock adoption.
+    this.clockRef = null;
     try {
       this.drawFrame();
     } catch (err) {
